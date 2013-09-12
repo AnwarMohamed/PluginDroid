@@ -2,25 +2,19 @@ package com.anwarelmakrahy.plugindroid;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+
+import dalvik.system.DexClassLoader;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.content.pm.ServiceInfo;
-import android.util.Log;
 
 public class PluginManager {
-
-	private static final String LOG_TAG = "PluginDroid";
-	
-	private static final String PLUGIN_STANDALONE = "com.anwarelmakahy.plugindroid.standalone";
-	private static final String PLUGIN_SHARED = "com.anwarelmakahy.plugindroid.shared";
 	
 	private static List<String> registeredPlugins = new ArrayList<String>();
 	private static Map<String, PluginDetails> loadedPlugins = new HashMap<String, PluginDetails>();
@@ -32,9 +26,13 @@ public class PluginManager {
 	private static PackageBroadcastReceiver packageBroadcastReceiver;
 	private static IntentFilter packageFilter;
 	
+	private static PackageManager pm;
+	
 	private static PluginDetails pluginDetails;
 	public static void loadPlugins(Context context, String pluginSignature) {
-		PackageManager pm = context.getPackageManager();
+		
+		if (pm == null)
+			pm = context.getPackageManager();
 		
 		if (!isPkgBReceiverRunning) {
 			packageBroadcastReceiver = new PackageBroadcastReceiver();
@@ -48,56 +46,54 @@ public class PluginManager {
 			isPkgBReceiverRunning = true;
 		}
 		
-		Intent baseIntent = new Intent(pluginSignature);
-		baseIntent.setFlags(Intent.FLAG_DEBUG_LOG_RESOLUTION);
-        List<ResolveInfo> list = pm.queryIntentServices(
-        		baseIntent, 
-        		PackageManager.GET_RESOLVED_FILTER 
-        		);
-
-		
-        for (int i=0; i<list.size(); i++) {
-            ResolveInfo info = list.get(i);
-            ServiceInfo sinfo = info.serviceInfo;
-			IntentFilter filter = info.filter;
+		loadPackages(context);
+	}	
+	
+	private static void loadPackages(Context context) {
+		loadedPlugins.clear();
+		for (int i=0; i<registeredPlugins.size(); i++) {
+			PackageInfo pkgInfo = getPackageInfo(context, registeredPlugins.get(i));
 			
-			if (sinfo != null) {
-				
-				for( Iterator<String> actionIterator = filter.actionsIterator(); actionIterator.hasNext();) {
-					String packageName = actionIterator.next();
-					if (registeredPlugins.contains(packageName)) {
-						
-						pluginDetails = new PluginDetails();
-						pluginDetails.packageName = packageName;
-						
-						// Get Plugin Category
-						if (filter.hasCategory(PLUGIN_STANDALONE))
-							pluginDetails.type = PLUGIN_STANDALONE;
-						else if (filter.hasCategory(PLUGIN_SHARED))
-							pluginDetails.type = PLUGIN_SHARED;
-						
-						
-						
-						Log.i(LOG_TAG, "Package " + pluginDetails.packageName + " Loaded");
-						loadedPlugins.put(packageName, pluginDetails);
-						break;
-					}
-				}
-			}
-
-        }
+			if (pkgInfo == null) break;
+			
+			pluginDetails = new PluginDetails(
+					registeredPlugins.get(i),
+					pkgInfo,
+					pm);
+			
+			loadedPlugins.put(registeredPlugins.get(i), pluginDetails);
+		}
 	}
 	
-	public Map<String, PluginDetails> getLoadedPlugins() {
+	public static Map<String, PluginDetails> getLoadedPlugins() {
 		return loadedPlugins;
 	}
 	
-	public static class PluginDetails {
-		String packageName;
-		String type;
+	public static class PluginDetails {	
+		PluginDetails(String packageName, PackageInfo info, PackageManager pm) {
+			this.packageName = packageName;
+			this.pkgInfo = info;
+			this.pm = pm;
+		}
+		
+		public PackageInfo getPackageInfo() {
+			return pkgInfo;
+		}
+		
+		public String getPackageName() {
+			return packageName;
+		}
+		
+		public PackageManager getPackageManager() {
+			return pm;
+		}
+		
+		private String packageName;
+		private PackageInfo pkgInfo;
+		private PackageManager pm;
 	}
 	
-	private static void removeRegisteredPlugin(String packageName) {
+	private static void unregisteredPlugin(String packageName) {
 		if (registeredPlugins.contains(packageName))
 			registeredPlugins.remove(packageName);
 	
@@ -113,13 +109,64 @@ public class PluginManager {
 			
 			if (Intent.ACTION_PACKAGE_REMOVED.equals(action) &&
 					registeredPlugins.contains(packageName)) {
-				removeRegisteredPlugin(packageName);
+				unregisteredPlugin(packageName);
 			}
 			else if (Intent.ACTION_PACKAGE_ADDED.equals(action) &&
 					registeredPlugins.contains(packageName)) {
-				Log.i(LOG_TAG, "New installed plugin" + packageName);
+				loadPackages(context);
 			}
+			
+			if (packageTableChangeListener != null)
+				packageTableChangeListener.packageTableChanged(action, packageName);
 
 		}
+	}
+	
+	private static PackageTableChangeListener packageTableChangeListener;
+	public static void setPackageTableChangerListener(PackageTableChangeListener listener) {
+		if (listener != null)
+			packageTableChangeListener = listener;
+	}
+	
+	public static abstract class PackageTableChangeListener {
+		protected void 
+		packageTableChanged(
+				String action, 
+				String packageName) {
+		}
+	}
+	
+	
+	
+	public static Class<?> newPluginContext(Context context, String packageName) {
+		if (!loadedPlugins.containsKey(packageName))
+			return null;
+		
+		DexClassLoader dLoader = new DexClassLoader(
+				loadedPlugins.get(packageName).getPackageInfo().applicationInfo.sourceDir,
+				context.getFilesDir().getAbsolutePath(),
+				null,
+				ClassLoader.getSystemClassLoader().getParent());
+		
+		try {
+			Class<?> newClass = dLoader.loadClass(packageName + ".ifs");
+			return newClass;
+		} catch (ClassNotFoundException e) {
+			return null;
+		}
+	
+	}
+	
+	private static PackageInfo getPackageInfo(
+			Context context, 
+			String packageName) {
+	    try {
+	        return context.getPackageManager().getPackageInfo(
+	        		packageName, 
+	        		PackageManager.GET_META_DATA);
+
+	    } catch (Exception e) {
+	        return null;
+	    }
 	}
 }
